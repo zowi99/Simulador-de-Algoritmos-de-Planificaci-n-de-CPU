@@ -1,0 +1,396 @@
+import time
+from collections import deque
+from dataclasses import dataclass
+from typing import List, Optional
+from enum import Enum
+import heapq
+
+class ProcessState(Enum):
+    NEW = "NEW"
+    READY = "READY"
+    RUNNING = "RUNNING"
+    WAITING = "WAITING"
+    TERMINATED = "TERMINATED"
+
+@dataclass
+class Process:
+    pid: int
+    arrival_time: int
+    burst_time: int
+    priority: int = 0
+    remaining_time: int = 0
+    start_time: Optional[int] = None
+    completion_time: Optional[int] = None
+    waiting_time: int = 0
+    turnaround_time: int = 0
+    response_time: Optional[int] = None
+    state: ProcessState = ProcessState.NEW
+    
+    def __post_init__(self):
+        if self.remaining_time == 0:
+            self.remaining_time = self.burst_time
+
+class CPUScheduler:
+    def __init__(self):
+        self.processes = []
+        self.current_time = 0
+        self.gantt_chart = []
+        self.context_switches = 0
+        
+    def add_process(self, process: Process):
+        """Agregar un proceso al simulador"""
+        self.processes.append(process)
+        
+    def reset_simulation(self):
+        """Reiniciar la simulación"""
+        self.current_time = 0
+        self.gantt_chart = []
+        self.context_switches = 0
+        for process in self.processes:
+            process.remaining_time = process.burst_time
+            process.start_time = None
+            process.completion_time = None
+            process.waiting_time = 0
+            process.turnaround_time = 0
+            process.response_time = None
+            process.state = ProcessState.NEW
+    
+    def calculate_metrics(self):
+        """Calcular métricas de rendimiento"""
+        for process in self.processes:
+            if process.completion_time is not None:
+                process.turnaround_time = process.completion_time - process.arrival_time
+                process.waiting_time = process.turnaround_time - process.burst_time
+        
+        completed_processes = [p for p in self.processes if p.completion_time is not None]
+        if not completed_processes:
+            return None
+            
+        avg_waiting_time = sum(p.waiting_time for p in completed_processes) / len(completed_processes)
+        avg_turnaround_time = sum(p.turnaround_time for p in completed_processes) / len(completed_processes)
+        avg_response_time = sum(p.response_time for p in completed_processes if p.response_time is not None) / len(completed_processes)
+        
+        return {
+            'avg_waiting_time': avg_waiting_time,
+            'avg_turnaround_time': avg_turnaround_time,
+            'avg_response_time': avg_response_time,
+            'context_switches': self.context_switches,
+            'total_time': self.current_time
+        }
+    
+    def fifo_scheduling(self):
+        """Algoritmo First In First Out (FCFS)"""
+        self.reset_simulation()
+        self.processes.sort(key=lambda x: x.arrival_time)
+        
+        for process in self.processes:
+            # Esperar hasta que llegue el proceso
+            if self.current_time < process.arrival_time:
+                self.current_time = process.arrival_time
+            
+            # Iniciar proceso
+            process.start_time = self.current_time
+            process.response_time = process.start_time - process.arrival_time
+            process.state = ProcessState.RUNNING
+            
+            # Agregar al diagrama de Gantt
+            self.gantt_chart.append((process.pid, self.current_time, self.current_time + process.burst_time))
+            
+            # Ejecutar proceso completamente
+            self.current_time += process.burst_time
+            process.completion_time = self.current_time
+            process.state = ProcessState.TERMINATED
+    
+    def sjf_scheduling(self, preemptive=False):
+        """Algoritmo Shortest Job First"""
+        self.reset_simulation()
+        ready_queue = []
+        remaining_processes = sorted(self.processes, key=lambda x: x.arrival_time)
+        current_process = None
+        
+        while remaining_processes or ready_queue or current_process:
+            # Agregar procesos que han llegado a la cola de listos
+            while remaining_processes and remaining_processes[0].arrival_time <= self.current_time:
+                process = remaining_processes.pop(0)
+                process.state = ProcessState.READY
+                if preemptive:
+                    heapq.heappush(ready_queue, (process.remaining_time, process.pid, process))
+                else:
+                    heapq.heappush(ready_queue, (process.burst_time, process.pid, process))
+            
+            # Si no hay proceso ejecutándose, tomar uno de la cola
+            if not current_process and ready_queue:
+                _, _, current_process = heapq.heappop(ready_queue)
+                if current_process.start_time is None:
+                    current_process.start_time = self.current_time
+                    current_process.response_time = current_process.start_time - current_process.arrival_time
+                current_process.state = ProcessState.RUNNING
+                self.context_switches += 1
+            
+            if current_process:
+                # En SJF preemptivo, verificar si hay un trabajo más corto
+                if preemptive and ready_queue:
+                    shortest_remaining = ready_queue[0][0]
+                    if shortest_remaining < current_process.remaining_time:
+                        # Preempción
+                        current_process.state = ProcessState.READY
+                        heapq.heappush(ready_queue, (current_process.remaining_time, current_process.pid, current_process))
+                        _, _, current_process = heapq.heappop(ready_queue)
+                        current_process.state = ProcessState.RUNNING
+                        self.context_switches += 1
+                
+                # Ejecutar por 1 unidad de tiempo
+                start_time = self.current_time
+                self.current_time += 1
+                current_process.remaining_time -= 1
+                
+                # Agregar al diagrama de Gantt
+                self.gantt_chart.append((current_process.pid, start_time, self.current_time))
+                
+                # Si el proceso terminó
+                if current_process.remaining_time == 0:
+                    current_process.completion_time = self.current_time
+                    current_process.state = ProcessState.TERMINATED
+                    current_process = None
+            else:
+                # No hay procesos para ejecutar, avanzar tiempo
+                if remaining_processes:
+                    self.current_time = remaining_processes[0].arrival_time
+                else:
+                    break
+    
+    def round_robin_scheduling(self, quantum=2):
+        """Algoritmo Round Robin"""
+        self.reset_simulation()
+        ready_queue = deque()
+        remaining_processes = sorted(self.processes, key=lambda x: x.arrival_time)
+        current_process = None
+        time_slice = 0
+        
+        while remaining_processes or ready_queue or current_process:
+            # Agregar procesos que han llegado a la cola de listos
+            while remaining_processes and remaining_processes[0].arrival_time <= self.current_time:
+                process = remaining_processes.pop(0)
+                process.state = ProcessState.READY
+                ready_queue.append(process)
+            
+            # Si no hay proceso ejecutándose o se acabó el quantum, cambiar proceso
+            if (not current_process or time_slice >= quantum) and ready_queue:
+                if current_process and current_process.remaining_time > 0:
+                    # El proceso actual vuelve a la cola
+                    current_process.state = ProcessState.READY
+                    ready_queue.append(current_process)
+                
+                current_process = ready_queue.popleft()
+                if current_process.start_time is None:
+                    current_process.start_time = self.current_time
+                    current_process.response_time = current_process.start_time - current_process.arrival_time
+                current_process.state = ProcessState.RUNNING
+                time_slice = 0
+                self.context_switches += 1
+            
+            if current_process:
+                # Ejecutar por 1 unidad de tiempo
+                start_time = self.current_time
+                self.current_time += 1
+                time_slice += 1
+                current_process.remaining_time -= 1
+                
+                # Agregar al diagrama de Gantt
+                self.gantt_chart.append((current_process.pid, start_time, self.current_time))
+                
+                # Si el proceso terminó
+                if current_process.remaining_time == 0:
+                    current_process.completion_time = self.current_time
+                    current_process.state = ProcessState.TERMINATED
+                    current_process = None
+                    time_slice = 0
+            else:
+                # No hay procesos para ejecutar, avanzar tiempo
+                if remaining_processes:
+                    self.current_time = remaining_processes[0].arrival_time
+                else:
+                    break
+    
+    def priority_scheduling(self, preemptive=False):
+        """Algoritmo de Planificación por Prioridades"""
+        self.reset_simulation()
+        ready_queue = []
+        remaining_processes = sorted(self.processes, key=lambda x: x.arrival_time)
+        current_process = None
+        
+        while remaining_processes or ready_queue or current_process:
+            # Agregar procesos que han llegado a la cola de listos
+            while remaining_processes and remaining_processes[0].arrival_time <= self.current_time:
+                process = remaining_processes.pop(0)
+                process.state = ProcessState.READY
+                # Menor número = mayor prioridad
+                heapq.heappush(ready_queue, (process.priority, process.pid, process))
+            
+            # Si no hay proceso ejecutándose, tomar uno de la cola
+            if not current_process and ready_queue:
+                _, _, current_process = heapq.heappop(ready_queue)
+                if current_process.start_time is None:
+                    current_process.start_time = self.current_time
+                    current_process.response_time = current_process.start_time - current_process.arrival_time
+                current_process.state = ProcessState.RUNNING
+                self.context_switches += 1
+            
+            if current_process:
+                # En Priority preemptivo, verificar si hay mayor prioridad
+                if preemptive and ready_queue:
+                    highest_priority = ready_queue[0][0]
+                    if highest_priority < current_process.priority:
+                        # Preempción
+                        current_process.state = ProcessState.READY
+                        heapq.heappush(ready_queue, (current_process.priority, current_process.pid, current_process))
+                        _, _, current_process = heapq.heappop(ready_queue)
+                        current_process.state = ProcessState.RUNNING
+                        self.context_switches += 1
+                
+                # Ejecutar por 1 unidad de tiempo
+                start_time = self.current_time
+                self.current_time += 1
+                current_process.remaining_time -= 1
+                
+                # Agregar al diagrama de Gantt
+                self.gantt_chart.append((current_process.pid, start_time, self.current_time))
+                
+                # Si el proceso terminó
+                if current_process.remaining_time == 0:
+                    current_process.completion_time = self.current_time
+                    current_process.state = ProcessState.TERMINATED
+                    current_process = None
+            else:
+                # No hay procesos para ejecutar, avanzar tiempo
+                if remaining_processes:
+                    self.current_time = remaining_processes[0].arrival_time
+                else:
+                    break
+    
+    def print_gantt_chart(self):
+        """Imprimir diagrama de Gantt simplificado"""
+        print("\n" + "="*50)
+        print("DIAGRAMA DE GANTT")
+        print("="*50)
+        
+        # Consolidar entradas consecutivas del mismo proceso
+        consolidated = []
+        for entry in self.gantt_chart:
+            pid, start, end = entry
+            if consolidated and consolidated[-1][0] == pid and consolidated[-1][2] == start:
+                # Extender el tiempo del proceso anterior
+                consolidated[-1] = (pid, consolidated[-1][1], end)
+            else:
+                consolidated.append(entry)
+        
+        print("Proceso | Inicio | Fin   | Duración")
+        print("-" * 35)
+        for pid, start, end in consolidated:
+            print(f"P{pid:<6} | {start:<6} | {end:<5} | {end-start}")
+    
+    def print_process_table(self):
+        """Imprimir tabla de procesos con métricas"""
+        print("\n" + "="*80)
+        print("TABLA DE PROCESOS")
+        print("="*80)
+        print("PID | Llegada | Ráfaga | Prioridad | Inicio | Fin | Espera | Retorno | Respuesta")
+        print("-" * 80)
+        
+        for process in sorted(self.processes, key=lambda x: x.pid):
+            print(f"P{process.pid:<2} | {process.arrival_time:<7} | {process.burst_time:<6} | "
+                  f"{process.priority:<9} | {process.start_time or 'N/A':<6} | "
+                  f"{process.completion_time or 'N/A':<3} | {process.waiting_time:<6} | "
+                  f"{process.turnaround_time:<7} | {process.response_time or 'N/A'}")
+
+def main():
+    scheduler = CPUScheduler()
+    
+    # Procesos de ejemplo
+    processes = [
+        Process(1, 0, 5, priority=2),
+        Process(2, 1, 3, priority=1),
+        Process(3, 2, 8, priority=3),
+        Process(4, 3, 6, priority=2),
+        Process(5, 4, 2, priority=1)
+    ]
+    
+    for process in processes:
+        scheduler.add_process(process)
+    
+    algorithms = {
+        '1': ('FIFO (First Come First Served)', lambda: scheduler.fifo_scheduling()),
+        '2': ('SJF (Shortest Job First)', lambda: scheduler.sjf_scheduling()),
+        '3': ('SJF Preemptivo', lambda: scheduler.sjf_scheduling(preemptive=True)),
+        '4': ('Round Robin (Quantum=2)', lambda: scheduler.round_robin_scheduling(2)),
+        '5': ('Round Robin (Quantum=4)', lambda: scheduler.round_robin_scheduling(4)),
+        '6': ('Priority Scheduling', lambda: scheduler.priority_scheduling()),
+        '7': ('Priority Preemptivo', lambda: scheduler.priority_scheduling(preemptive=True))
+    }
+    
+    while True:
+        print("\n" + "="*60)
+        print("SIMULADOR DE ALGORITMOS DE PLANIFICACIÓN DE CPU")
+        print("="*60)
+        print("Procesos cargados:")
+        for p in processes:
+            print(f"  P{p.pid}: Llegada={p.arrival_time}, Ráfaga={p.burst_time}, Prioridad={p.priority}")
+        
+        print("\nSeleccione un algoritmo:")
+        for key, (name, _) in algorithms.items():
+            print(f"{key}. {name}")
+        print("8. Comparar todos los algoritmos")
+        print("9. Modificar procesos")
+        print("0. Salir")
+        
+        choice = input("\nIngrese su opción: ").strip()
+        
+        if choice == '0':
+            print("¡Gracias por usar el simulador!")
+            break
+        elif choice in algorithms:
+            name, func = algorithms[choice]
+            print(f"\n>>> Ejecutando {name} <<<")
+            func()
+            scheduler.calculate_metrics()
+            scheduler.print_gantt_chart()
+            scheduler.print_process_table()
+            
+            metrics = scheduler.calculate_metrics()
+            if metrics:
+                print(f"\n{'='*50}")
+                print("MÉTRICAS DE RENDIMIENTO")
+                print(f"{'='*50}")
+                print(f"Tiempo promedio de espera: {metrics['avg_waiting_time']:.2f}")
+                print(f"Tiempo promedio de retorno: {metrics['avg_turnaround_time']:.2f}")
+                print(f"Tiempo promedio de respuesta: {metrics['avg_response_time']:.2f}")
+                print(f"Cambios de contexto: {metrics['context_switches']}")
+                print(f"Tiempo total: {metrics['total_time']}")
+            
+            input("\nPresione Enter para continuar...")
+        
+        elif choice == '8':
+            print("\n>>> COMPARACIÓN DE TODOS LOS ALGORITMOS <<<")
+            print("\nAlgoritmo                    | T.Espera | T.Retorno | T.Respuesta | Contexto")
+            print("-" * 75)
+            
+            for key, (name, func) in algorithms.items():
+                func()
+                scheduler.calculate_metrics()
+                metrics = scheduler.calculate_metrics()
+                if metrics:
+                    print(f"{name:<28} | {metrics['avg_waiting_time']:>8.2f} | "
+                          f"{metrics['avg_turnaround_time']:>9.2f} | {metrics['avg_response_time']:>11.2f} | "
+                          f"{metrics['context_switches']:>8}")
+            
+            input("\nPresione Enter para continuar...")
+        
+        elif choice == '9':
+            print("Funcionalidad de modificación de procesos no implementada en esta versión.")
+            input("Presione Enter para continuar...")
+        
+        else:
+            print("Opción no válida. Intente de nuevo.")
+
+if __name__ == "__main__":
+    main()
