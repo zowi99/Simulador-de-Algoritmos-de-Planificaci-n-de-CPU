@@ -1,0 +1,928 @@
+#!/usr/bin/env python3
+"""
+Interfaz Gráfica para el Simulador de Algoritmos de Planificación de CPU
+Usando Tkinter con diseño moderno y visualizaciones interactivas
+"""
+
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+import pandas as pd
+from typing import List, Dict, Any
+import json
+import csv
+from datetime import datetime
+
+# Importar las clases del simulador
+from cpu_scheduler import CPUScheduler, Process, ProcessState
+
+class ModernStyle:
+    """Configuración de estilo moderno para la aplicación"""
+    
+    # Colores del tema
+    PRIMARY = "#2E86C1"
+    SECONDARY = "#48C9B0"
+    ACCENT = "#F39C12"
+    SUCCESS = "#27AE60"
+    WARNING = "#E67E22"
+    DANGER = "#E74C3C"
+    DARK = "#2C3E50"
+    LIGHT = "#ECF0F1"
+    WHITE = "#FFFFFF"
+    
+    # Fuentes
+    FONT_TITLE = ("Segoe UI", 14, "bold")
+    FONT_HEADER = ("Segoe UI", 12, "bold")
+    FONT_NORMAL = ("Segoe UI", 10)
+    FONT_SMALL = ("Segoe UI", 9)
+
+class ProcessInputDialog:
+    """Diálogo para agregar/editar procesos"""
+    
+    def __init__(self, parent, process=None):
+        self.result = None
+        self.window = tk.Toplevel(parent)
+        self.window.title("Agregar Proceso" if process is None else "Editar Proceso")
+        self.window.geometry("400x300")
+        self.window.resizable(False, False)
+        self.window.transient(parent)
+        self.window.grab_set()
+        
+        # Centrar ventana
+        self.window.geometry("+%d+%d" % (parent.winfo_rootx() + 50, parent.winfo_rooty() + 50))
+        
+        self.create_widgets(process)
+        
+    def create_widgets(self, process):
+        main_frame = ttk.Frame(self.window, padding="20")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Título
+        title_label = ttk.Label(main_frame, text="Datos del Proceso", font=ModernStyle.FONT_HEADER)
+        title_label.pack(pady=(0, 20))
+        
+        # Campos de entrada
+        fields = [
+            ("PID:", "pid"),
+            ("Tiempo de Llegada:", "arrival_time"),
+            ("Tiempo de Ráfaga:", "burst_time"),
+            ("Prioridad:", "priority")
+        ]
+        
+        self.entries = {}
+        for label_text, field_name in fields:
+            frame = ttk.Frame(main_frame)
+            frame.pack(fill=tk.X, pady=5)
+            
+            label = ttk.Label(frame, text=label_text, width=15, anchor="w")
+            label.pack(side=tk.LEFT)
+            
+            entry = ttk.Entry(frame, font=ModernStyle.FONT_NORMAL)
+            entry.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(10, 0))
+            self.entries[field_name] = entry
+            
+            # Prellenar si estamos editando
+            if process:
+                entry.insert(0, str(getattr(process, field_name)))
+        
+        # Botones
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(20, 0))
+        
+        ttk.Button(button_frame, text="Cancelar", command=self.cancel).pack(side=tk.RIGHT, padx=(10, 0))
+        ttk.Button(button_frame, text="Aceptar", command=self.accept).pack(side=tk.RIGHT)
+        
+    def accept(self):
+        try:
+            self.result = {
+                'pid': int(self.entries['pid'].get()),
+                'arrival_time': int(self.entries['arrival_time'].get()),
+                'burst_time': int(self.entries['burst_time'].get()),
+                'priority': int(self.entries['priority'].get())
+            }
+            self.window.destroy()
+        except ValueError:
+            messagebox.showerror("Error", "Por favor ingrese valores numéricos válidos")
+    
+    def cancel(self):
+        self.window.destroy()
+
+class GanttChart:
+    """Widget personalizado para mostrar diagrama de Gantt"""
+    
+    def __init__(self, parent):
+        self.figure = Figure(figsize=(12, 6), dpi=100)
+        self.canvas = FigureCanvasTkAgg(self.figure, parent)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        
+    def update_chart(self, gantt_data, processes):
+        self.figure.clear()
+        ax = self.figure.add_subplot(111)
+        
+        if not gantt_data:
+            ax.text(0.5, 0.5, 'No hay datos para mostrar', 
+                   transform=ax.transAxes, ha='center', va='center', fontsize=14)
+            self.canvas.draw()
+            return
+        
+        # Consolidar datos consecutivos del mismo proceso
+        consolidated = []
+        for entry in gantt_data:
+            pid, start, end = entry
+            if consolidated and consolidated[-1][0] == pid and consolidated[-1][2] == start:
+                consolidated[-1] = (pid, consolidated[-1][1], end)
+            else:
+                consolidated.append(entry)
+        
+        # Colores para diferentes procesos
+        colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FECA57', '#FF9FF3', '#54A0FF']
+        
+        y_pos = 0.5
+        height = 0.6
+        
+        for i, (pid, start, end) in enumerate(consolidated):
+            color = colors[pid % len(colors)]
+            ax.barh(y_pos, end - start, left=start, height=height, 
+                   color=color, alpha=0.8, edgecolor='black', linewidth=1)
+            
+            # Etiqueta del proceso
+            ax.text(start + (end - start) / 2, y_pos, f'P{pid}', 
+                   ha='center', va='center', fontweight='bold', fontsize=10)
+        
+        # Configurar ejes
+        ax.set_xlim(0, max(end for _, _, end in consolidated) + 1)
+        ax.set_ylim(0, 1)
+        ax.set_xlabel('Tiempo', fontsize=12, fontweight='bold')
+        ax.set_title('Diagrama de Gantt', fontsize=14, fontweight='bold', pad=20)
+        ax.set_yticks([])
+        ax.grid(True, axis='x', alpha=0.3)
+        
+        # Marcar tiempos en el eje X
+        max_time = max(end for _, _, end in consolidated)
+        ax.set_xticks(range(0, max_time + 1, max(1, max_time // 10)))
+        
+        self.figure.tight_layout()
+        self.canvas.draw()
+
+class MetricsChart:
+    """Widget para mostrar gráficos de métricas"""
+    
+    def __init__(self, parent):
+        self.figure = Figure(figsize=(10, 6), dpi=100)
+        self.canvas = FigureCanvasTkAgg(self.figure, parent)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+    
+    def update_chart(self, processes, metrics_data=None):
+        self.figure.clear()
+        
+        if not processes:
+            ax = self.figure.add_subplot(111)
+            ax.text(0.5, 0.5, 'No hay datos para mostrar', 
+                   transform=ax.transAxes, ha='center', va='center', fontsize=14)
+            self.canvas.draw()
+            return
+        
+        # Crear subplots
+        if metrics_data:
+            # Comparación de algoritmos
+            ax1 = self.figure.add_subplot(121)
+            ax2 = self.figure.add_subplot(122)
+            
+            algorithms = list(metrics_data.keys())
+            waiting_times = [metrics_data[alg]['avg_waiting_time'] for alg in algorithms]
+            turnaround_times = [metrics_data[alg]['avg_turnaround_time'] for alg in algorithms]
+            
+            x_pos = range(len(algorithms))
+            
+            # Gráfico de tiempos de espera
+            bars1 = ax1.bar(x_pos, waiting_times, color=ModernStyle.PRIMARY, alpha=0.7)
+            ax1.set_title('Tiempo Promedio de Espera', fontweight='bold')
+            ax1.set_xlabel('Algoritmos')
+            ax1.set_ylabel('Tiempo')
+            ax1.set_xticks(x_pos)
+            ax1.set_xticklabels([alg.replace(' ', '\n') for alg in algorithms], rotation=45, ha='right')
+            
+            # Agregar valores en las barras
+            for bar, value in zip(bars1, waiting_times):
+                ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1,
+                        f'{value:.1f}', ha='center', va='bottom', fontweight='bold')
+            
+            # Gráfico de tiempos de retorno
+            bars2 = ax2.bar(x_pos, turnaround_times, color=ModernStyle.SECONDARY, alpha=0.7)
+            ax2.set_title('Tiempo Promedio de Retorno', fontweight='bold')
+            ax2.set_xlabel('Algoritmos')
+            ax2.set_ylabel('Tiempo')
+            ax2.set_xticks(x_pos)
+            ax2.set_xticklabels([alg.replace(' ', '\n') for alg in algorithms], rotation=45, ha='right')
+            
+            # Agregar valores en las barras
+            for bar, value in zip(bars2, turnaround_times):
+                ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1,
+                        f'{value:.1f}', ha='center', va='bottom', fontweight='bold')
+        else:
+            # Gráfico individual de procesos
+            ax = self.figure.add_subplot(111)
+            
+            pids = [f'P{p.pid}' for p in processes if p.completion_time is not None]
+            waiting_times = [p.waiting_time for p in processes if p.completion_time is not None]
+            turnaround_times = [p.turnaround_time for p in processes if p.completion_time is not None]
+            
+            if not pids:
+                ax.text(0.5, 0.5, 'No hay procesos completados', 
+                       transform=ax.transAxes, ha='center', va='center', fontsize=14)
+                self.canvas.draw()
+                return
+            
+            x = range(len(pids))
+            width = 0.35
+            
+            bars1 = ax.bar([i - width/2 for i in x], waiting_times, width, 
+                          label='Tiempo de Espera', color=ModernStyle.PRIMARY, alpha=0.7)
+            bars2 = ax.bar([i + width/2 for i in x], turnaround_times, width,
+                          label='Tiempo de Retorno', color=ModernStyle.SECONDARY, alpha=0.7)
+            
+            ax.set_xlabel('Procesos')
+            ax.set_ylabel('Tiempo')
+            ax.set_title('Métricas por Proceso')
+            ax.set_xticks(x)
+            ax.set_xticklabels(pids)
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            
+            # Agregar valores en las barras
+            for bars in [bars1, bars2]:
+                for bar in bars:
+                    height = bar.get_height()
+                    ax.text(bar.get_x() + bar.get_width()/2., height + 0.1,
+                           f'{height:.1f}', ha='center', va='bottom', fontsize=9)
+        
+        self.figure.tight_layout()
+        self.canvas.draw()
+
+class CPUSchedulerGUI:
+    """Interfaz gráfica principal del simulador"""
+    
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("Simulador de Algoritmos de Planificación de CPU")
+        self.root.geometry("1200x800")
+        self.root.minsize(1000, 700)
+        
+        # Configurar estilo
+        self.setup_style()
+        
+        # Inicializar simulador
+        self.scheduler = CPUScheduler()
+        self.comparison_data = {}
+        
+        # Crear interfaz
+        self.create_widgets()
+        
+        # Cargar procesos de ejemplo
+        self.load_example_processes()
+        
+    def setup_style(self):
+        """Configurar el estilo de la aplicación"""
+        style = ttk.Style()
+        style.theme_use('clam')
+        
+        # Configurar colores y fuentes
+        style.configure('Title.TLabel', font=ModernStyle.FONT_TITLE, foreground=ModernStyle.DARK)
+        style.configure('Header.TLabel', font=ModernStyle.FONT_HEADER, foreground=ModernStyle.PRIMARY)
+        style.configure('Info.TLabel', font=ModernStyle.FONT_SMALL, foreground=ModernStyle.DARK)
+        
+        # Botones personalizados
+        style.configure('Primary.TButton', font=ModernStyle.FONT_NORMAL)
+        style.configure('Success.TButton', font=ModernStyle.FONT_NORMAL)
+        style.configure('Warning.TButton', font=ModernStyle.FONT_NORMAL)
+        
+    def create_widgets(self):
+        """Crear todos los widgets de la interfaz"""
+        # Frame principal
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Título
+        title_label = ttk.Label(main_frame, text="Simulador de Algoritmos de Planificación de CPU", 
+                               style='Title.TLabel')
+        title_label.pack(pady=(0, 10))
+        
+        # Crear notebook (pestañas)
+        self.notebook = ttk.Notebook(main_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+        
+        # Crear pestañas
+        self.create_process_tab()
+        self.create_simulation_tab()
+        self.create_comparison_tab()
+        self.create_results_tab()
+        
+    def create_process_tab(self):
+        """Crear pestaña de gestión de procesos"""
+        process_frame = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(process_frame, text="Procesos")
+        
+        # Frame superior para controles
+        control_frame = ttk.Frame(process_frame)
+        control_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Botones de control
+        ttk.Button(control_frame, text="Agregar Proceso", 
+                  command=self.add_process, style='Primary.TButton').pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(control_frame, text="Editar Proceso", 
+                  command=self.edit_process, style='Primary.TButton').pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Eliminar Proceso", 
+                  command=self.delete_process, style='Warning.TButton').pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Limpiar Todo", 
+                  command=self.clear_processes, style='Warning.TButton').pack(side=tk.LEFT, padx=5)
+        
+        # Separador
+        ttk.Separator(control_frame, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        
+        # Botones de archivo
+        ttk.Button(control_frame, text="Cargar desde CSV", 
+                  command=self.load_from_csv).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Guardar en CSV", 
+                  command=self.save_to_csv).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Procesos de Ejemplo", 
+                  command=self.load_example_processes, style='Success.TButton').pack(side=tk.RIGHT)
+        
+        # Tabla de procesos
+        self.create_process_table(process_frame)
+        
+    def create_process_table(self, parent):
+        """Crear tabla de procesos"""
+        # Frame para la tabla
+        table_frame = ttk.Frame(parent)
+        table_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Treeview
+        columns = ('PID', 'Llegada', 'Ráfaga', 'Prioridad', 'Estado')
+        self.process_tree = ttk.Treeview(table_frame, columns=columns, show='headings', height=15)
+        
+        # Configurar columnas
+        for col in columns:
+            self.process_tree.heading(col, text=col, anchor=tk.CENTER)
+            self.process_tree.column(col, width=100, anchor=tk.CENTER)
+        
+        # Scrollbars
+        v_scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.process_tree.yview)
+        h_scrollbar = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=self.process_tree.xview)
+        self.process_tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+        
+        # Posicionar elementos
+        self.process_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # Bind doble click para editar
+        self.process_tree.bind('<Double-1>', lambda e: self.edit_process())
+        
+    def create_simulation_tab(self):
+        """Crear pestaña de simulación"""
+        sim_frame = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(sim_frame, text="Simulación")
+        
+        # Frame de controles
+        control_frame = ttk.LabelFrame(sim_frame, text="Algoritmos de Planificación", padding="10")
+        control_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Algoritmos disponibles
+        algorithms = [
+            ("FIFO (First Come First Served)", "fifo"),
+            ("SJF (Shortest Job First)", "sjf"),
+            ("SJF Preemptivo", "sjf_preemptive"),
+            ("Round Robin (Q=2)", "rr_2"),
+            ("Round Robin (Q=4)", "rr_4"),
+            ("Priority Scheduling", "priority"),
+            ("Priority Preemptivo", "priority_preemptive")
+        ]
+        
+        # Crear botones en grid
+        for i, (name, key) in enumerate(algorithms):
+            row, col = i // 3, i % 3
+            btn = ttk.Button(control_frame, text=name, 
+                           command=lambda k=key: self.run_algorithm(k),
+                           style='Primary.TButton')
+            btn.grid(row=row, column=col, padx=5, pady=5, sticky='ew')
+        
+        # Configurar grid
+        for i in range(3):
+            control_frame.columnconfigure(i, weight=1)
+        
+        # Frame para quantum personalizado
+        quantum_frame = ttk.Frame(control_frame)
+        quantum_frame.grid(row=len(algorithms)//3 + 1, column=0, columnspan=3, pady=10, sticky='ew')
+        
+        ttk.Label(quantum_frame, text="Round Robin - Quantum personalizado:").pack(side=tk.LEFT)
+        self.quantum_var = tk.StringVar(value="3")
+        quantum_entry = ttk.Entry(quantum_frame, textvariable=self.quantum_var, width=5)
+        quantum_entry.pack(side=tk.LEFT, padx=5)
+        ttk.Button(quantum_frame, text="Ejecutar", 
+                  command=self.run_custom_rr, style='Primary.TButton').pack(side=tk.LEFT, padx=5)
+        
+        # Frame para resultados
+        results_frame = ttk.LabelFrame(sim_frame, text="Resultados", padding="10")
+        results_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Crear diagrama de Gantt
+        self.gantt_chart = GanttChart(results_frame)
+        
+    def create_comparison_tab(self):
+        """Crear pestaña de comparación"""
+        comp_frame = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(comp_frame, text="Comparación")
+        
+        # Controles
+        control_frame = ttk.Frame(comp_frame)
+        control_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Button(control_frame, text="Comparar Todos los Algoritmos", 
+                  command=self.compare_all_algorithms, 
+                  style='Success.TButton').pack(side=tk.LEFT, padx=(0, 10))
+        
+        ttk.Button(control_frame, text="Limpiar Comparación", 
+                  command=self.clear_comparison,
+                  style='Warning.TButton').pack(side=tk.LEFT)
+        
+        ttk.Button(control_frame, text="Exportar Resultados", 
+                  command=self.export_comparison,
+                  style='Primary.TButton').pack(side=tk.RIGHT)
+        
+        # Tabla de comparación
+        self.create_comparison_table(comp_frame)
+        
+        # Gráfico de comparación
+        chart_frame = ttk.LabelFrame(comp_frame, text="Gráficos Comparativos", padding="5")
+        chart_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        
+        self.comparison_chart = MetricsChart(chart_frame)
+        
+    def create_comparison_table(self, parent):
+        """Crear tabla de comparación de algoritmos"""
+        table_frame = ttk.LabelFrame(parent, text="Resultados Comparativos", padding="5")
+        table_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        columns = ('Algoritmo', 'T. Espera', 'T. Retorno', 'T. Respuesta', 'Cambios Contexto')
+        self.comparison_tree = ttk.Treeview(table_frame, columns=columns, show='headings', height=8)
+        
+        # Configurar columnas
+        widths = [200, 80, 80, 80, 120]
+        for col, width in zip(columns, widths):
+            self.comparison_tree.heading(col, text=col, anchor=tk.CENTER)
+            self.comparison_tree.column(col, width=width, anchor=tk.CENTER)
+        
+        # Scrollbar
+        comp_scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.comparison_tree.yview)
+        self.comparison_tree.configure(yscrollcommand=comp_scrollbar.set)
+        
+        self.comparison_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        comp_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+    def create_results_tab(self):
+        """Crear pestaña de resultados detallados"""
+        results_frame = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(results_frame, text="Resultados Detallados")
+        
+        # Frame de información
+        info_frame = ttk.LabelFrame(results_frame, text="Información del Algoritmo", padding="10")
+        info_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.algorithm_info = ttk.Label(info_frame, text="Seleccione un algoritmo para ver los resultados",
+                                       style='Info.TLabel')
+        self.algorithm_info.pack()
+        
+        # Notebook secundario para diferentes vistas
+        self.results_notebook = ttk.Notebook(results_frame)
+        self.results_notebook.pack(fill=tk.BOTH, expand=True)
+        
+        # Tabla de procesos detallada
+        self.create_detailed_table()
+        
+        # Gráfico de métricas
+        self.create_metrics_chart()
+        
+    def create_detailed_table(self):
+        """Crear tabla detallada de procesos"""
+        table_frame = ttk.Frame(self.results_notebook, padding="5")
+        self.results_notebook.add(table_frame, text="Tabla Detallada")
+        
+        columns = ('PID', 'Llegada', 'Ráfaga', 'Prioridad', 'Inicio', 'Fin', 'Espera', 'Retorno', 'Respuesta')
+        self.detailed_tree = ttk.Treeview(table_frame, columns=columns, show='headings')
+        
+        # Configurar columnas
+        for col in columns:
+            self.detailed_tree.heading(col, text=col, anchor=tk.CENTER)
+            self.detailed_tree.column(col, width=80, anchor=tk.CENTER)
+        
+        # Scrollbars
+        v_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.detailed_tree.yview)
+        h_scroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=self.detailed_tree.xview)
+        self.detailed_tree.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
+        
+        self.detailed_tree.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        
+    def create_metrics_chart(self):
+        """Crear gráfico de métricas"""
+        chart_frame = ttk.Frame(self.results_notebook, padding="5")
+        self.results_notebook.add(chart_frame, text="Gráficos")
+        
+        self.metrics_chart = MetricsChart(chart_frame)
+        
+    # Métodos de funcionalidad
+    def add_process(self):
+        """Agregar nuevo proceso"""
+        dialog = ProcessInputDialog(self.root)
+        self.root.wait_window(dialog.window)
+        
+        if dialog.result:
+            # Verificar que el PID no exista
+            existing_pids = [p.pid for p in self.scheduler.processes]
+            if dialog.result['pid'] in existing_pids:
+                messagebox.showerror("Error", f"Ya existe un proceso con PID {dialog.result['pid']}")
+                return
+            
+            process = Process(**dialog.result)
+            self.scheduler.add_process(process)
+            self.update_process_table()
+            
+    def edit_process(self):
+        """Editar proceso seleccionado"""
+        selection = self.process_tree.selection()
+        if not selection:
+            messagebox.showwarning("Advertencia", "Seleccione un proceso para editar")
+            return
+        
+        item = self.process_tree.item(selection[0])
+        pid = int(item['values'][0])
+        process = next((p for p in self.scheduler.processes if p.pid == pid), None)
+        
+        if process:
+            dialog = ProcessInputDialog(self.root, process)
+            self.root.wait_window(dialog.window)
+            
+            if dialog.result:
+                # Actualizar proceso
+                process.pid = dialog.result['pid']
+                process.arrival_time = dialog.result['arrival_time']
+                process.burst_time = dialog.result['burst_time']
+                process.priority = dialog.result['priority']
+                process.remaining_time = process.burst_time
+                
+                self.update_process_table()
+    
+    def delete_process(self):
+        """Eliminar proceso seleccionado"""
+        selection = self.process_tree.selection()
+        if not selection:
+            messagebox.showwarning("Advertencia", "Seleccione un proceso para eliminar")
+            return
+        
+        if messagebox.askyesno("Confirmar", "¿Está seguro de que desea eliminar el proceso seleccionado?"):
+            item = self.process_tree.item(selection[0])
+            pid = int(item['values'][0])
+            self.scheduler.processes = [p for p in self.scheduler.processes if p.pid != pid]
+            self.update_process_table()
+    
+    def clear_processes(self):
+        """Limpiar todos los procesos"""
+        if messagebox.askyesno("Confirmar", "¿Está seguro de que desea eliminar todos los procesos?"):
+            self.scheduler.processes = []
+            self.update_process_table()
+    
+    def load_example_processes(self):
+        """Cargar procesos de ejemplo"""
+        example_processes = [
+            Process(1, 0, 5, priority=2),
+            Process(2, 1, 3, priority=1),
+            Process(3, 2, 8, priority=3),
+            Process(4, 3, 6, priority=2),
+            Process(5, 4, 2, priority=1)
+        ]
+        
+        self.scheduler.processes = example_processes
+        self.update_process_table()
+        messagebox.showinfo("Información", "Procesos de ejemplo cargados correctamente")
+    
+    def update_process_table(self):
+        """Actualizar tabla de procesos"""
+        # Limpiar tabla
+        for item in self.process_tree.get_children():
+            self.process_tree.delete(item)
+        
+        # Agregar procesos
+        for process in sorted(self.scheduler.processes, key=lambda x: x.pid):
+            self.process_tree.insert('', 'end', values=(
+                process.pid,
+                process.arrival_time,
+                process.burst_time,
+                process.priority,
+                process.state.value
+            ))
+    
+    def load_from_csv(self):
+        """Cargar procesos desde archivo CSV"""
+        filename = filedialog.askopenfilename(
+            title="Seleccionar archivo CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            try:
+                processes = []
+                with open(filename, 'r', newline='', encoding='utf-8') as csvfile:
+                    reader = csv.DictReader(csvfile)
+                    for row in reader:
+                        process = Process(
+                            pid=int(row['PID']),
+                            arrival_time=int(row['Llegada']),
+                            burst_time=int(row['Rafaga']),
+                            priority=int(row.get('Prioridad', 0))
+                        )
+                        processes.append(process)
+                
+                self.scheduler.processes = processes
+                self.update_process_table()
+                messagebox.showinfo("Éxito", f"Se cargaron {len(processes)} procesos desde {filename}")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Error al cargar archivo: {str(e)}")
+    
+    def save_to_csv(self):
+        """Guardar procesos en archivo CSV"""
+        if not self.scheduler.processes:
+            messagebox.showwarning("Advertencia", "No hay procesos para guardar")
+            return
+        
+        filename = filedialog.asksaveasfilename(
+            title="Guardar procesos como CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            try:
+                with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+                    fieldnames = ['PID', 'Llegada', 'Rafaga', 'Prioridad']
+                    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                    
+                    writer.writeheader()
+                    for process in self.scheduler.processes:
+                        writer.writerow({
+                            'PID': process.pid,
+                            'Llegada': process.arrival_time,
+                            'Rafaga': process.burst_time,
+                            'Prioridad': process.priority
+                        })
+                
+                messagebox.showinfo("Éxito", f"Procesos guardados en {filename}")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Error al guardar archivo: {str(e)}")
+    
+    def run_algorithm(self, algorithm_key):
+        """Ejecutar algoritmo específico"""
+        if not self.scheduler.processes:
+            messagebox.showwarning("Advertencia", "Agregue procesos antes de ejecutar la simulación")
+            return
+        
+        # Mapeo de algoritmos
+        algorithms_map = {
+            'fifo': ('FIFO (First Come First Served)', lambda: self.scheduler.fifo_scheduling()),
+            'sjf': ('SJF (Shortest Job First)', lambda: self.scheduler.sjf_scheduling()),
+            'sjf_preemptive': ('SJF Preemptivo', lambda: self.scheduler.sjf_scheduling(preemptive=True)),
+            'rr_2': ('Round Robin (Q=2)', lambda: self.scheduler.round_robin_scheduling(2)),
+            'rr_4': ('Round Robin (Q=4)', lambda: self.scheduler.round_robin_scheduling(4)),
+            'priority': ('Priority Scheduling', lambda: self.scheduler.priority_scheduling()),
+            'priority_preemptive': ('Priority Preemptivo', lambda: self.scheduler.priority_scheduling(preemptive=True))
+        }
+        
+        if algorithm_key not in algorithms_map:
+            return
+        
+        name, func = algorithms_map[algorithm_key]
+        
+        try:
+            # Ejecutar algoritmo
+            func()
+            metrics = self.scheduler.calculate_metrics()
+            
+            # Actualizar interfaz
+            self.gantt_chart.update_chart(self.scheduler.gantt_chart, self.scheduler.processes)
+            self.update_detailed_results(name, metrics)
+            self.metrics_chart.update_chart(self.scheduler.processes)
+            
+            # Cambiar a pestaña de simulación
+            self.notebook.select(1)
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Error al ejecutar algoritmo: {str(e)}")
+    
+    def run_custom_rr(self):
+        """Ejecutar Round Robin con quantum personalizado"""
+        try:
+            quantum = int(self.quantum_var.get())
+            if quantum <= 0:
+                raise ValueError("El quantum debe ser mayor que 0")
+            
+            if not self.scheduler.processes:
+                messagebox.showwarning("Advertencia", "Agregue procesos antes de ejecutar la simulación")
+                return
+            
+            # Ejecutar Round Robin
+            self.scheduler.round_robin_scheduling(quantum)
+            metrics = self.scheduler.calculate_metrics()
+            
+            # Actualizar interfaz
+            self.gantt_chart.update_chart(self.scheduler.gantt_chart, self.scheduler.processes)
+            self.update_detailed_results(f"Round Robin (Q={quantum})", metrics)
+            self.metrics_chart.update_chart(self.scheduler.processes)
+            
+        except ValueError as e:
+            messagebox.showerror("Error", f"Quantum inválido: {str(e)}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Error al ejecutar algoritmo: {str(e)}")
+    
+    def compare_all_algorithms(self):
+        """Comparar todos los algoritmos"""
+        if not self.scheduler.processes:
+            messagebox.showwarning("Advertencia", "Agregue procesos antes de ejecutar la comparación")
+            return
+        
+        algorithms = [
+            ('FIFO', lambda: self.scheduler.fifo_scheduling()),
+            ('SJF', lambda: self.scheduler.sjf_scheduling()),
+            ('SJF Preemptivo', lambda: self.scheduler.sjf_scheduling(preemptive=True)),
+            ('Round Robin (Q=2)', lambda: self.scheduler.round_robin_scheduling(2)),
+            ('Round Robin (Q=4)', lambda: self.scheduler.round_robin_scheduling(4)),
+            ('Priority', lambda: self.scheduler.priority_scheduling()),
+            ('Priority Preemptivo', lambda: self.scheduler.priority_scheduling(preemptive=True))
+        ]
+        
+        self.comparison_data = {}
+        
+        # Limpiar tabla de comparación
+        for item in self.comparison_tree.get_children():
+            self.comparison_tree.delete(item)
+        
+        try:
+            for name, func in algorithms:
+                func()
+                metrics = self.scheduler.calculate_metrics()
+                
+                if metrics:
+                    self.comparison_data[name] = metrics
+                    
+                    # Agregar a tabla
+                    self.comparison_tree.insert('', 'end', values=(
+                        name,
+                        f"{metrics['avg_waiting_time']:.2f}",
+                        f"{metrics['avg_turnaround_time']:.2f}",
+                        f"{metrics['avg_response_time']:.2f}",
+                        metrics['context_switches']
+                    ))
+            
+            # Actualizar gráfico de comparación
+            self.comparison_chart.update_chart(self.scheduler.processes, self.comparison_data)
+            
+            # Cambiar a pestaña de comparación
+            self.notebook.select(2)
+            
+            messagebox.showinfo("Éxito", "Comparación completada")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Error en la comparación: {str(e)}")
+    
+    def clear_comparison(self):
+        """Limpiar resultados de comparación"""
+        self.comparison_data = {}
+        for item in self.comparison_tree.get_children():
+            self.comparison_tree.delete(item)
+        
+        # Limpiar gráfico
+        self.comparison_chart.figure.clear()
+        self.comparison_chart.canvas.draw()
+    
+    def export_comparison(self):
+        """Exportar resultados de comparación"""
+        if not self.comparison_data:
+            messagebox.showwarning("Advertencia", "No hay datos de comparación para exportar")
+            return
+        
+        filename = filedialog.asksaveasfilename(
+            title="Exportar comparación",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            try:
+                if filename.endswith('.json'):
+                    # Exportar como JSON
+                    export_data = {
+                        'timestamp': datetime.now().isoformat(),
+                        'processes': [
+                            {
+                                'pid': p.pid,
+                                'arrival_time': p.arrival_time,
+                                'burst_time': p.burst_time,
+                                'priority': p.priority
+                            } for p in self.scheduler.processes
+                        ],
+                        'results': self.comparison_data
+                    }
+                    
+                    with open(filename, 'w', encoding='utf-8') as f:
+                        json.dump(export_data, f, indent=2, ensure_ascii=False)
+                else:
+                    # Exportar como CSV
+                    with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+                        fieldnames = ['Algoritmo', 'Tiempo_Espera', 'Tiempo_Retorno', 'Tiempo_Respuesta', 'Cambios_Contexto']
+                        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                        
+                        writer.writeheader()
+                        for alg_name, metrics in self.comparison_data.items():
+                            writer.writerow({
+                                'Algoritmo': alg_name,
+                                'Tiempo_Espera': round(metrics['avg_waiting_time'], 2),
+                                'Tiempo_Retorno': round(metrics['avg_turnaround_time'], 2),
+                                'Tiempo_Respuesta': round(metrics['avg_response_time'], 2),
+                                'Cambios_Contexto': metrics['context_switches']
+                            })
+                
+                messagebox.showinfo("Éxito", f"Datos exportados a {filename}")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Error al exportar: {str(e)}")
+    
+    def update_detailed_results(self, algorithm_name, metrics):
+        """Actualizar resultados detallados"""
+        # Actualizar información del algoritmo
+        if metrics:
+            info_text = f"Algoritmo: {algorithm_name}\n"
+            info_text += f"Tiempo promedio de espera: {metrics['avg_waiting_time']:.2f}\n"
+            info_text += f"Tiempo promedio de retorno: {metrics['avg_turnaround_time']:.2f}\n"
+            info_text += f"Tiempo promedio de respuesta: {metrics['avg_response_time']:.2f}\n"
+            info_text += f"Cambios de contexto: {metrics['context_switches']}\n"
+            info_text += f"Tiempo total de ejecución: {metrics['total_time']}"
+        else:
+            info_text = f"Algoritmo: {algorithm_name}\nNo hay métricas disponibles"
+        
+        self.algorithm_info.config(text=info_text)
+        
+        # Actualizar tabla detallada
+        for item in self.detailed_tree.get_children():
+            self.detailed_tree.delete(item)
+        
+        for process in sorted(self.scheduler.processes, key=lambda x: x.pid):
+            self.detailed_tree.insert('', 'end', values=(
+                process.pid,
+                process.arrival_time,
+                process.burst_time,
+                process.priority,
+                process.start_time if process.start_time is not None else 'N/A',
+                process.completion_time if process.completion_time is not None else 'N/A',
+                process.waiting_time,
+                process.turnaround_time,
+                process.response_time if process.response_time is not None else 'N/A'
+            ))
+    
+    def run(self):
+        """Ejecutar la aplicación"""
+        # Configurar protocolo de cierre
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        # Centrar ventana
+        self.center_window()
+        
+        # Iniciar loop principal
+        self.root.mainloop()
+    
+    def center_window(self):
+        """Centrar ventana en la pantalla"""
+        self.root.update_idletasks()
+        width = self.root.winfo_width()
+        height = self.root.winfo_height()
+        x = (self.root.winfo_screenwidth() // 2) - (width // 2)
+        y = (self.root.winfo_screenheight() // 2) - (height // 2)
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+    
+    def on_closing(self):
+        """Manejar cierre de aplicación"""
+        if messagebox.askokcancel("Salir", "¿Desea cerrar la aplicación?"):
+            self.root.destroy()
+
+def main():
+    """Función principal"""
+    try:
+        app = CPUSchedulerGUI()
+        app.run()
+    except Exception as e:
+        messagebox.showerror("Error Fatal", f"Error al iniciar la aplicación: {str(e)}")
+
+if __name__ == "__main__":
+    main()
